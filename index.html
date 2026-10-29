@@ -2,6 +2,7 @@
 <html lang="uz">
   <head>
     <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Interactive Dragon</title>
     <style>
       html,
@@ -35,7 +36,7 @@
   </head>
   <body>
     <canvas id="c"></canvas>
-    <div id="hint">sichqonchani harakatlantiring — sherlar yergsatib</div>
+    <div id="hint">Move your mouse or touch the screen to guide the dragon.</div>
     <script>
       const canvas = document.getElementById("c");
       const ctx = canvas.getContext("2d");
@@ -50,21 +51,16 @@
       // ---- Mouse / touch target ----
       let target = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
       let hasMoved = false;
-      window.addEventListener("mousemove", (e) => {
+      window.addEventListener("pointermove", (e) => {
         target.x = e.clientX;
         target.y = e.clientY;
         hasMoved = true;
       });
-      window.addEventListener(
-        "touchmove",
-        (e) => {
-          const t = e.touches[0];
-          target.x = t.clientX;
-          target.y = t.clientY;
-          hasMoved = true;
-        },
-        { passive: true },
-      );
+      window.addEventListener("pointerdown", (e) => {
+        target.x = e.clientX;
+        target.y = e.clientY;
+        hasMoved = true;
+      });
 
       const hint = document.getElementById("hint");
       setTimeout(() => {
