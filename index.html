@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="uz">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Interactive Dragon</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: #0a0a0f;
+        height: 100%;
+        cursor: crosshair;
+      }
+      canvas {
+        display: block;
+      }
+      #hint {
+        position: fixed;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        color: rgba(180, 200, 255, 0.55);
+        font:
+          13px/1.4 -apple-system,
+          system-ui,
+          sans-serif;
+        letter-spacing: 0.03em;
+        pointer-events: none;
+        text-align: center;
+        transition: opacity 1s ease;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div id="hint">Move your mouse or touch the screen to guide the dragon.</div>
+    <script>
+      const canvas = document.getElementById("c");
+      const ctx = canvas.getContext("2d");
+      let W, H;
+      function resize() {
+        W = canvas.width = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+      }
+      resize();
+      window.addEventListener("resize", resize);
+
+      // ---- Mouse / touch target ----
+      let target = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      let hasMoved = false;
+      window.addEventListener("pointermove", (e) => {
+        target.x = e.clientX;
+        target.y = e.clientY;
+        hasMoved = true;
+      });
+      window.addEventListener("pointerdown", (e) => {
+        target.x = e.clientX;
+        target.y = e.clientY;
+        hasMoved = true;
+      });
+
+      const hint = document.getElementById("hint");
+      setTimeout(() => {
+        hint.style.opacity = 0;
+      }, 2500);
+
+      // ---- Spine chain (FABRIK-style follow) ----
+      const SEGMENTS = 26;
+      const SEGMENT_LEN = 16;
+      let spine = [];
+      for (let i = 0; i < SEGMENTS; i++) {
+        spine.push({ x: target.x - i * SEGMENT_LEN, y: target.y });
+      }
+
+      function updateSpine() {
+        spine[0].x = target.x;
+        spine[0].y = target.y;
+        for (let i = 1; i < spine.length; i++) {
+          const prev = spine[i - 1];
+          const cur = spine[i];
+          const dx = cur.x - prev.x;
+          const dy = cur.y - prev.y;
+          const dist = Math.hypot(dx, dy) || 0.0001;
+          const ratio = SEGMENT_LEN / dist;
+          cur.x = prev.x + dx * ratio;
+          cur.y = prev.y + dy * ratio;
+        }
+      }
+
+      // ---- Width profile (body taper: shoulders wide, tail thin) ----
+      function widthAt(i) {
+        const t = i / (SEGMENTS - 1);
+        const head = Math.max(0, 1 - t * 6); // quick taper near head/neck
+        const body = Math.sin(Math.min(1, t * 1.6) * Math.PI * 0.5);
+        const tailTaper = Math.pow(1 - t, 1.4);
+        return (10 + head * 6) * tailTaper * 0.9 + body * 0;
+      }
+
+      // ---- Two-bone leg IK ----
+      function solveLeg(
+        originX,
+        originY,
+        targetX,
+        targetY,
+        upperLen,
+        lowerLen,
+        bendSign,
+      ) {
+        let dx = targetX - originX,
+          dy = targetY - originY;
+        let dist = Math.hypot(dx, dy);
+        dist = Math.min(dist, upperLen + lowerLen - 0.5);
+        dist = Math.max(dist, Math.abs(upperLen - lowerLen) + 0.5);
+
+        const a = upperLen,
+          b = lowerLen,
+          c = dist;
+        const angA = Math.acos(
+          Math.max(-1, Math.min(1, (a * a + c * c - b * b) / (2 * a * c))),
+        );
+        const baseAngle = Math.atan2(dy, dx);
+        const kneeAngle = baseAngle + bendSign * angA;
+
+        const kneeX = originX + Math.cos(kneeAngle) * a;
+        const kneeY = originY + Math.sin(kneeAngle) * a;
+        return { kneeX, kneeY, footX: targetX, footY: targetY };
+      }
+      // ---- Legs: attach at spine indices, with stepping feet ----
+      const legDefs = [
+        { spineIdx: 5, side: -1, upper: 34, lower: 34, offset: 30 },
+        { spineIdx: 5, side: 1, upper: 34, lower: 34, offset: 30 },
+        { spineIdx: 13, side: -1, upper: 40, lower: 40, offset: 34 },
+        { spineIdx: 13, side: 1, upper: 40, lower: 40, offset: 34 },
+      ];
+      legDefs.forEach((leg) => {
+        leg.footX = spine[leg.spineIdx].x;
+        leg.footY = spine[leg.spineIdx].y + leg.side * leg.offset;
+        leg.stepping = false;
+        leg.stepStart = { x: leg.footX, y: leg.footY };
+        leg.stepTarget = { x: leg.footX, y: leg.footY };
+        leg.stepT = 0;
+      });
+
+      function perp(x, y) {
+        return { x: -y, y: x };
+      }
+
+      function updateLegs(time) {
+        legDefs.forEach((leg) => {
+          const s = spine[leg.spineIdx];
+          const sNext = spine[Math.min(leg.spineIdx + 1, spine.length - 1)];
+          let dirx = sNext.x - s.x,
+            diry = sNext.y - s.y;
+          const dl = Math.hypot(dirx, diry) || 1;
+          dirx /= dl;
+          diry /= dl;
+          const px = -diry,
+            py = dirx;
+
+          const desiredX = s.x + px * leg.side * leg.offset - dirx * 6;
+          const desiredY = s.y + py * leg.side * leg.offset - diry * 6;
+
+          const distFromFoot = Math.hypot(
+            desiredX - leg.footX,
+            desiredY - leg.footY,
+          );
+
+          if (!leg.stepping && distFromFoot > leg.upper * 0.55) {
+            leg.stepping = true;
+            leg.stepT = 0;
+            leg.stepStart = { x: leg.footX, y: leg.footY };
+            leg.stepTarget = {
+              x: desiredX + dirx * leg.upper * 0.35,
+              y: desiredY + diry * leg.upper * 0.35,
+            };
+          }
+
+          if (leg.stepping) {
+            leg.stepT += 0.14;
+            const t = Math.min(1, leg.stepT);
+            const lift = Math.sin(t * Math.PI) * 18;
+            leg.footX =
+              leg.stepStart.x + (leg.stepTarget.x - leg.stepStart.x) * t;
+            leg.footY =
+              leg.stepStart.y + (leg.stepTarget.y - leg.stepStart.y) * t - lift;
+            if (t >= 1) leg.stepping = false;
+          }
+          const origin = s;
+          const ik = solveLeg(
+            origin.x,
+            origin.y,
+            leg.footX,
+            leg.footY,
+            leg.upper,
+            leg.lower,
+            leg.side,
+          );
+          leg.knee = { x: ik.kneeX, y: ik.kneeY };
+          leg.hip = origin;
+        });
+      }
+
+      // ---- Drawing ----
+      function drawBodyOutline() {
+        const left = [];
+        const right = [];
+        for (let i = 0; i < spine.length; i++) {
+          const cur = spine[i];
+          const next = spine[Math.min(i + 1, spine.length - 1)];
+          const prev = spine[Math.max(i - 1, 0)];
+          let dx = next.x - prev.x,
+            dy = next.y - prev.y;
+          const dl = Math.hypot(dx, dy) || 1;
+          dx /= dl;
+          dy /= dl;
+          const px = -dy,
+            py = dx;
+          const w = widthAt(i);
+          left.push({ x: cur.x + px * w, y: cur.y + py * w });
+          right.push({ x: cur.x - px * w, y: cur.y - py * w });
+        }
+        ctx.beginPath();
+        ctx.moveTo(left[0].x, left[0].y);
+        for (let i = 1; i < left.length; i++) ctx.lineTo(left[i].x, left[i].y);
+        for (let i = right.length - 1; i >= 0; i--)
+          ctx.lineTo(right[i].x, right[i].y);
+        ctx.closePath();
+
+        const grad = ctx.createLinearGradient(
+          spine[0].x,
+          spine[0].y,
+          spine[spine.length - 1].x,
+          spine[spine.length - 1].y,
+        );
+        grad.addColorStop(0, "rgba(120,200,255,0.16)");
+        grad.addColorStop(1, "rgba(120,200,255,0.02)");
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(160,215,255,0.55)";
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+      }
+
+      function drawSpineLine() {
+        ctx.beginPath();
+        ctx.moveTo(spine[0].x, spine[0].y);
+        for (let i = 1; i < spine.length; i++)
+          ctx.lineTo(spine[i].x, spine[i].y);
+        ctx.strokeStyle = "rgba(200,230,255,0.85)";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      }
+      function drawRibs() {
+        for (let i = 1; i < spine.length - 1; i += 1) {
+          const cur = spine[i];
+          const next = spine[Math.min(i + 1, spine.length - 1)];
+          const prev = spine[Math.max(i - 1, 0)];
+          let dx = next.x - prev.x,
+            dy = next.y - prev.y;
+          const dl = Math.hypot(dx, dy) || 1;
+          dx /= dl;
+          dy /= dl;
+          const px = -dy,
+            py = dx;
+          const w = widthAt(i) * 0.95;
+          ctx.beginPath();
+          ctx.moveTo(cur.x + px * w, cur.y + py * w);
+          ctx.lineTo(cur.x - px * w, cur.y - py * w);
+          ctx.strokeStyle = "rgba(150,210,255,0.35)";
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+
+      function drawLegs() {
+        legDefs.forEach((leg) => {
+          ctx.beginPath();
+          ctx.moveTo(leg.hip.x, leg.hip.y);
+          ctx.lineTo(leg.knee.x, leg.knee.y);
+          ctx.lineTo(leg.footX, leg.footY);
+          ctx.strokeStyle = "rgba(190,225,255,0.75)";
+          ctx.lineWidth = 2;
+          ctx.lineCap = "round";
+          ctx.stroke();
+          // small claw marks
+          const clawAngle = Math.atan2(
+            leg.footY - leg.knee.y,
+            leg.footX - leg.knee.x,
+          );
+          for (let c = -1; c <= 1; c++) {
+            const a = clawAngle + c * 0.35;
+            ctx.beginPath();
+            ctx.moveTo(leg.footX, leg.footY);
+            ctx.lineTo(
+              leg.footX + Math.cos(a) * 8,
+              leg.footY + Math.sin(a) * 8,
+            );
+            ctx.strokeStyle = "rgba(190,225,255,0.5)";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
+        });
+      }
+
+      function drawHead() {
+        const head = spine[0];
+        const next = spine[1];
+        const angle = Math.atan2(head.y - next.y, head.x - next.x);
+        ctx.save();
+        ctx.translate(head.x, head.y);
+        ctx.rotate(angle);
+        ctx.beginPath();
+        ctx.ellipse(4, 0, 12, 7, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(120,200,255,0.12)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(200,230,255,0.9)";
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        // horns / whiskers
+        ctx.beginPath();
+        ctx.moveTo(8, -4);
+        ctx.lineTo(20, -14);
+        ctx.moveTo(8, 4);
+        ctx.lineTo(18, 12);
+        ctx.strokeStyle = "rgba(200,230,255,0.6)";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // eye
+        ctx.beginPath();
+        ctx.arc(6, -2.5, 1.4, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(180,255,240,0.95)";
+        ctx.fill();
+        ctx.restore();
+      }
+
+      function animate(time) {
+        ctx.clearRect(0, 0, W, H);
+        updateSpine();
+        updateLegs(time);
+
+        drawBodyOutline();
+        drawLegs();
+        drawRibs();
+        drawSpineLine();
+        drawHead();
+
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+    </script>
+  </body>
+</html>
